@@ -1,0 +1,21 @@
+node_modules
+.next
+.venv
+.venv-inference
+out
+dist
+.env
+.env.local
+.env*.local
+*.log
+.DS_Store
+public/uploads/*
+!public/uploads/.gitkeep
+prisma/*.db
+prisma/migrations/dev.db*
+
+# Local training/research assets — not part of the deployed app
+notebooks/
+dataset/
+checkpoint/
+tsconfig.tsbuildinfo

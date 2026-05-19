@@ -1,0 +1,303 @@
+################################################################################
+# Dockerfile for Transcode Monitor & Video Processing
+################################################################################
+#
+# Optimized for:
+#   - Ubuntu 24.04 LTS (Noble Numbat)
+#   - NVIDIA RTX 6000 Ada Generation (48GB VRAM, Compute 8.9)
+#   - NVIDIA Driver 580.126.09 / CUDA 13.0
+#   - Docker 29.2.0 with NVIDIA Container Toolkit 1.18.2
+#
+# Build:
+#   docker build -t transcode-monitor .
+#
+# Run with GPU:
+#   docker run -it --rm --gpus all -p 3000:3000 transcode-monitor
+#
+# Verify NVENC:
+#   docker run --rm --gpus all transcode-monitor ffmpeg -encoders | grep nvenc
+#
+################################################################################
+
+# NVIDIA CUDA 12.8 runtime for Ubuntu 24.04
+# Latest stable image compatible with driver 580.x
+# The runtime image includes CUDA libraries needed for FFmpeg hardware acceleration
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
+
+# Prevent interactive prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Set working directory
+WORKDIR /app
+
+################################################################################
+# NVIDIA Driver Capabilities
+################################################################################
+# CRITICAL: This tells the NVIDIA Container Toolkit which libraries to mount
+# from the host. Setting to "all" ensures libnvidia-encode.so and other
+# encoding/decoding libraries are available for FFmpeg NVENC.
+#
+# Options: compute, compat32, graphics, utility, video, display, all
+# We need "video" for NVENC, but "all" is safest.
+#
+# IMPORTANT: nvidia-smi is NOT installed in the container!
+# It is mounted from the host by the NVIDIA Container Toolkit when you run
+# with --gpus all. If nvidia-smi is not available inside the container:
+#   1. Ensure NVIDIA Container Toolkit is installed on host
+#   2. Run with: docker run --gpus all ...
+#   3. For Coolify: Enable GPU in service Advanced settings
+#
+# Troubleshooting GPU passthrough:
+#   - Host: nvidia-smi should work
+#   - Container without --gpus: nvidia-smi will NOT be found
+#   - Container with --gpus all: nvidia-smi SHOULD work
+################################################################################
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=all
+
+################################################################################
+# STAGE 1: Install System Dependencies
+################################################################################
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Core utilities
+    ca-certificates \
+    curl \
+    wget \
+    gnupg \
+    # Build tools (for native Node modules like pg)
+    build-essential \
+    python3 \
+    # Shell utilities used by transcode scripts
+    bash \
+    coreutils \
+    bc \
+    jq \
+    file \
+    # Process management & parallel processing
+    parallel \
+    procps \
+    # File locking support (flock)
+    util-linux \
+    # Network tools
+    iputils-ping \
+    dnsutils \
+    # PostgreSQL client (for database operations)
+    postgresql-client \
+    # Hardware detection (lspci for GPU detection)
+    pciutils \
+    # Misc utilities
+    unzip \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+################################################################################
+# STAGE 2: Install FFmpeg with NVENC Support
+################################################################################
+# Ubuntu 24.04 ships FFmpeg 6.1.1 with NVENC support built-in.
+# The actual NVENC encoding libraries (libnvidia-encode.so) are mounted
+# from the host by the NVIDIA Container Toolkit at runtime.
+# DO NOT install libnvidia-encode-* packages - they come from the host!
+################################################################################
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo "=== FFmpeg Version ===" && ffmpeg -version | head -3
+
+################################################################################
+# STAGE 3: Install Node.js 20 LTS
+################################################################################
+
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    rm -rf /var/lib/apt/lists/* && \
+    echo "=== Node.js ===" && node --version && npm --version
+
+# Install pnpm globally for faster package management
+RUN npm install -g pnpm
+
+################################################################################
+# STAGE 4: Install rclone (for R2/S3 cloud storage)
+################################################################################
+
+RUN curl -fsSL https://rclone.org/install.sh | bash && \
+    echo "=== rclone ===" && rclone version | head -1
+
+################################################################################
+# STAGE 5: Copy and Install Application
+################################################################################
+
+# Copy package files first for better Docker layer caching
+# Note: pnpm-lock.yaml may not exist, that's OK - pnpm will generate it
+COPY package.json pnpm-lock.yaml* ./
+COPY Linux/package.json Linux/pnpm-lock.yaml* ./Linux/
+
+# Install root project dependencies
+# Try frozen-lockfile first (if lock file exists), fallback to regular install
+RUN echo "=== Installing root dependencies ===" && \
+    pnpm install --frozen-lockfile 2>/dev/null || pnpm install && \
+    echo "=== Root dependencies installed ===" && \
+    ls -la node_modules/ | head -10
+
+# Install Linux subproject dependencies
+WORKDIR /app/Linux
+RUN echo "=== Installing Linux dependencies ===" && \
+    pnpm install --frozen-lockfile 2>/dev/null || pnpm install && \
+    echo "=== Linux dependencies installed ===" && \
+    ls -la node_modules/ | head -10
+WORKDIR /app
+
+# Copy all application files (node_modules excluded by .dockerignore)
+COPY . .
+
+# Make all shell scripts executable
+RUN find . -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+
+# Verify node_modules exist after COPY (shouldn't overwrite since .dockerignore excludes them)
+RUN echo "=== Verifying node_modules ===" && \
+    echo "Root node_modules:" && ls /app/node_modules/ | head -5 && \
+    echo "Linux node_modules:" && ls /app/Linux/node_modules/ | head -5 && \
+    echo "=== All dependencies verified ==="
+
+################################################################################
+# STAGE 6: Configure Runtime Environment
+################################################################################
+
+# Create directories that scripts expect
+# /app/data is for persistent storage (mount a volume here on Coolify/Docker)
+# Contains: transcode-state.json (resume state) and log/ directory
+RUN mkdir -p \
+    /app/data/log \
+    /app/test-output \
+    /app/Linux/test-output \
+    /root/.config/rclone \
+    /root/.parallel
+
+# Set DATA_DIR for persistent storage (state file + logs)
+# Mount a volume to /app/data on Coolify to persist across deployments
+# Files stored in DATA_DIR:
+#   - transcode-state.json (tracks completed/failed files for resume)
+#   - log/transcode-*.log (session logs for debugging)
+ENV DATA_DIR=/app/data
+
+# Indicate this is a Docker environment (scripts auto-detect, but this ensures it)
+# Scripts use this to show Docker-specific troubleshooting guidance
+ENV RUNNING_IN_DOCKER=true
+
+# Suppress GNU Parallel citation notice
+RUN touch /root/.parallel/will-cite
+
+# Set production environment
+ENV NODE_ENV=production
+ENV PATH="/app:${PATH}"
+
+# Expose monitor server port
+EXPOSE 3000
+
+################################################################################
+# STAGE 7: Health Check & Entry Point
+################################################################################
+
+# Health check for monitor server
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:3000/health || exit 1
+
+# Default command: start the monitor server
+CMD ["node", "monitor-server.js"]
+
+################################################################################
+# Your System (verified 2025-01-31):
+#   GPU: NVIDIA RTX 6000 Ada Generation (48GB VRAM, Compute 8.9)
+#   Driver: 580.126.09 / CUDA 13.0
+#   CPU: Intel Xeon Gold 6548Y+ (8 cores)
+#   RAM: 62GB
+#   Host OS: Ubuntu 24.04.3 LTS
+#   Docker: 29.2.0
+#   NVIDIA Container Toolkit: 1.18.2
+#
+# Verified NVENC Support:
+#   - h264_nvenc (H.264 hardware encoding)
+#   - hevc_nvenc (H.265/HEVC hardware encoding)  
+#   - av1_nvenc (AV1 hardware encoding - Ada Lovelace+)
+#
+# Usage Examples:
+#
+#   # Build the image
+#   docker build -t transcode-monitor .
+#
+#   # Run monitor server with GPU and persistent storage
+#   docker run -d --gpus all -p 3000:3000 \
+#     -v transcode-data:/app/data \
+#     -v ~/.config/rclone:/root/.config/rclone:ro \
+#     -v $(pwd)/.env:/app/.env:ro \
+#     --name transcode-monitor \
+#     transcode-monitor
+#
+#   # Verify NVENC encoders are available
+#   docker run --rm --gpus all transcode-monitor \
+#     ffmpeg -encoders 2>/dev/null | grep nvenc
+#
+#   # Run transcode script interactively
+#   docker run -it --rm --gpus all \
+#     -v transcode-data:/app/data \
+#     -v ~/.config/rclone:/root/.config/rclone:ro \
+#     -v $(pwd)/Linux/.env:/app/Linux/.env:ro \
+#     -w /app/Linux \
+#     transcode-monitor \
+#     bash ./test-transcode-linux.sh
+#
+#   # Test GPU access (nvidia-smi comes from host via NVIDIA Container Toolkit)
+#   docker run --rm --gpus all transcode-monitor nvidia-smi
+#
+# Required Volume Mounts for Full Functionality:
+#
+#   Volume Mount                                  | Purpose
+#   ---------------------------------------------|----------------------------------
+#   -v transcode-data:/app/data                  | Resume state + logs (REQUIRED)
+#   -v ~/.config/rclone:/root/.config/rclone:ro  | rclone config (OR use env vars)
+#
+#   NOTE: .env files are NOT needed when using Coolify/Docker env vars!
+#   The scripts detect Docker environment and check env vars directly.
+#   Set DATABASE_URL and RCLONE_CONFIG_* as environment variables instead.
+#
+# Coolify Configuration:
+#
+#   1. GPU Setup:
+#      - Advanced → GPU → Enable
+#      - GPU Count: 1 (or number of GPUs)
+#      - GPU Options: (leave empty)
+#
+#   2. Storage (Add these volumes):
+#      - transcode-data → /app/data (persistent storage)
+#      - (Optional) /home/user/.config/rclone → /root/.config/rclone
+#
+#   3. Environment Variables (RECOMMENDED - no files to mount!):
+#      Required:
+#      - DATABASE_URL: your postgres connection string
+#
+#      For rclone R2 (instead of mounting config file):
+#      - RCLONE_CONFIG_CRMTASTYR2_TYPE: s3
+#      - RCLONE_CONFIG_CRMTASTYR2_PROVIDER: Cloudflare
+#      - RCLONE_CONFIG_CRMTASTYR2_ACCESS_KEY_ID: your_r2_access_key
+#      - RCLONE_CONFIG_CRMTASTYR2_SECRET_ACCESS_KEY: your_r2_secret_key
+#      - RCLONE_CONFIG_CRMTASTYR2_ENDPOINT: https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+#
+#      Optional:
+#      - NVIDIA_VISIBLE_DEVICES: all (usually auto-set by GPU config)
+#
+#   4. If GPU not working (nvidia-smi not found):
+#      - Verify NVIDIA Container Toolkit is installed on host
+#      - Check host nvidia-smi works: ssh host && nvidia-smi
+#      - Try restarting the container/service
+#
+# Persistent Storage (IMPORTANT for Coolify/Production):
+#   The /app/data directory stores transcode-state.json which tracks:
+#   - Which files have been processed (completed)
+#   - Which files failed (and retry counts)
+#   - Resume capability after crashes
+#
+#   On Coolify: Add a Volume Mount to /app/data
+#   This ensures progress is not lost between deployments!
+#
+################################################################################

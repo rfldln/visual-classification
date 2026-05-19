@@ -1,0 +1,90 @@
+# ================================================================================
+# Docker Ignore File
+# ================================================================================
+# Files and directories to exclude from Docker build context
+# This keeps the image smaller and build faster
+
+# Git
+.git
+.gitignore
+
+# Node modules (will be installed fresh in container)
+node_modules/
+Linux/node_modules/
+
+# Environment files (should be mounted at runtime, not baked into image)
+.env
+.env.local
+.env.*.local
+Linux/.env
+Linux/.env.local
+
+# Log files
+*.log
+log/
+Linux/log/
+
+# Output directories (should be mounted as volumes)
+test-output/
+Linux/test-output/
+
+# State files (runtime generated)
+transcode-state.json
+transcode-state.json.backup*
+Linux/transcode-state.json
+Linux/transcode-state.json.backup*
+
+# Lock files
+*.lock
+!pnpm-lock.yaml
+
+# macOS files
+.DS_Store
+*.DS_Store
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Documentation (not needed in runtime image)
+*.md
+!README.md
+
+# Test video files (don't include large files)
+*.mov
+*.MOV
+*.mp4
+*.MP4
+*.avi
+*.mkv
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Markdown documentation files
+ALL-CHECKS-CONFIRMED.md
+CHANGES.md
+COMPLETE-WORKFLOW.md
+EDGE-CASE-HARDENING-SUMMARY.md
+FINAL-SUMMARY.md
+LATEST-UPDATES.md
+METADATA-FIX-SUMMARY.md
+MULTI-CREATOR-SUPPORT.md
+R2-METADATA.md
+README-DB-SETUP.md
+SETUP-COMPLETE.md
+THUMBNAIL-VERIFICATION.md
+UPLOADER-TYPE-FIX.md
+VERIFICATION-AUDIT.md
+VERIFICATION-CHECKS.md
+VERIFICATION-SUMMARY.md
+VERIFICATION-VISUAL.txt
+
+# Dockerfile itself (not needed inside container)
+Dockerfile
+docker-compose*.yml

@@ -1,0 +1,94 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model MediaItem {
+  id            String        @id @default(cuid())
+  userId        String        @default("")
+  filename      String
+  originalName  String
+  mimeType      String
+  fileSize      BigInt
+  filePath      String
+  thumbPath     String?
+  kind          MediaKind
+  duration      Float?
+  width         Int?
+  height        Int?
+  uploadedAt    DateTime      @default(now())
+  autoTags      String[]      @default([])
+  autoTagStatus AutoTagStatus @default(PENDING)
+  autoTaggedAt  DateTime?
+  purpose       MediaPurpose  @default(TRAINING)
+  frames        Frame[]
+
+  @@index([userId])
+  @@index([userId, uploadedAt])
+  @@index([uploadedAt])
+  @@index([kind])
+  @@index([autoTagStatus])
+}
+
+model Frame {
+  id           String       @id @default(cuid())
+  mediaItemId  String
+  mediaItem    MediaItem    @relation(fields: [mediaItemId], references: [id], onDelete: Cascade)
+  frameIndex   Int
+  timeSec      Float        @default(0)
+  filePath     String
+  width        Int?
+  height       Int?
+  status       ReviewStatus @default(PENDING)
+  flagged      Boolean      @default(false)
+  flagReason   String?
+  reviewedAt   DateTime?
+  reviewerName String?
+  createdAt    DateTime     @default(now())
+  labels       Label[]
+
+  @@unique([mediaItemId, frameIndex])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Label {
+  id         String   @id @default(cuid())
+  frameId    String
+  frame      Frame    @relation(fields: [frameId], references: [id], onDelete: Cascade)
+  categoryId String
+  createdAt  DateTime @default(now())
+
+  @@unique([frameId, categoryId])
+  @@index([categoryId])
+}
+
+enum MediaKind {
+  IMAGE
+  VIDEO
+}
+
+enum AutoTagStatus {
+  PENDING
+  PROCESSING
+  DONE
+  FAILED
+  SKIPPED
+}
+
+enum MediaPurpose {
+  TRAINING
+  VAULT
+}
+
+enum ReviewStatus {
+  PENDING
+  REVIEWED
+  FLAGGED
+  SKIPPED
+}
