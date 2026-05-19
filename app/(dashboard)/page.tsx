@@ -42,14 +42,29 @@ function tagLabel(id: string) {
 }
 
 export default function DashboardPage() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["stats"],
-    queryFn: async () => (await fetch("/api/stats")).json() as Promise<Stats>,
+    queryFn: async () => {
+      const res = await fetch("/api/stats");
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json() as Promise<Stats>;
+    },
     refetchInterval: 5000,
+    retry: 1,
   });
 
-  if (isLoading || !data) {
+  if (isLoading) {
     return <div className="p-6 text-sm text-zinc-500">Loading…</div>;
+  }
+
+  if (isError || !data) {
+    return (
+      <div className="p-6 space-y-2">
+        <p className="text-sm text-red-400">Failed to load stats.</p>
+        <p className="text-xs text-zinc-500">{String(error)}</p>
+        <p className="text-xs text-zinc-600">Check that all Vercel environment variables are set and redeploy.</p>
+      </div>
+    );
   }
 
   const taggedPct = data.totalItems > 0

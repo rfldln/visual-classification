@@ -72,7 +72,7 @@ export default function VaultPage() {
   const fileInputRef                    = useRef<HTMLInputElement>(null);
   const qc = useQueryClient();
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ["vault", { page, kindFilter, statusFilter }],
     queryFn: async () => {
       const qs = new URLSearchParams();
@@ -80,7 +80,9 @@ export default function VaultPage() {
       qs.set("limit", "24");
       if (kindFilter)   qs.set("kind", kindFilter);
       if (statusFilter) qs.set("autoTagStatus", statusFilter);
-      return (await fetch(`/api/sources?${qs}`)).json() as Promise<VaultResponse>;
+      const res = await fetch(`/api/sources?${qs}`);
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return res.json() as Promise<VaultResponse>;
     },
     refetchInterval: (query) => {
       const active = query.state.data?.items.some(
@@ -88,6 +90,7 @@ export default function VaultPage() {
       );
       return active ? 2000 : false;
     },
+    retry: 1,
   });
 
   const retryMutation = useMutation({
@@ -247,6 +250,11 @@ export default function VaultPage() {
       {/* Grid */}
       {isLoading ? (
         <p className="text-sm text-zinc-500">Loading…</p>
+      ) : isError ? (
+        <div className="rounded border border-red-900 bg-red-950/30 p-6 text-sm">
+          <p className="text-red-400">Failed to load vault: {String(error)}</p>
+          <p className="mt-1 text-xs text-zinc-500">Check that all Vercel environment variables are set correctly.</p>
+        </div>
       ) : !data || data.items.length === 0 ? (
         <div className="rounded border border-dashed border-zinc-800 p-12 text-center text-sm text-zinc-500">
           {kindFilter || statusFilter ? "No items match the current filters." : "Nothing in the vault yet — upload something above."}
