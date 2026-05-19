@@ -132,34 +132,59 @@ export default function VaultPage() {
     setUploading(true);
     for (const file of list) {
       try {
-        const form = new FormData();
-        form.set("file", file, file.name);
-        form.set("originalName", file.name);
-        form.set("mimeType", file.type);
+        // Step 1: probe metadata client-side
+        const headers: Record<string, string> = {
+          "x-filename":  encodeURIComponent(file.name),
+          "x-mime-type": file.type,
+          "Content-Type": file.type,
+        };
+        let thumbBlob: Blob | null = null;
         if (file.type.startsWith("video/")) {
           try {
             const meta = await probeVideoMeta(file);
-            form.set("duration", String(meta.duration));
-            form.set("width", String(meta.width));
-            form.set("height", String(meta.height));
-            const thumb = await extractThumbnail(file, { timeSec: 0.5, maxWidth: 512 });
-            form.set("thumbnail", new File([thumb], "thumb.jpg", { type: "image/jpeg" }));
+            headers["x-duration"] = String(meta.duration);
+            headers["x-width"]    = String(meta.width);
+            headers["x-height"]   = String(meta.height);
+            thumbBlob = await extractThumbnail(file, { timeSec: 0.5, maxWidth: 512 });
           } catch (err) {
-            console.warn("Video probe/thumbnail failed, uploading without:", err);
+            console.warn("Video probe/thumbnail failed:", err);
           }
         } else {
-          // Image dimensions are optional; let the server skip them.
           try {
             const dims = await probeImageMeta(file);
-            form.set("width", String(dims.width));
-            form.set("height", String(dims.height));
+            headers["x-width"]  = String(dims.width);
+            headers["x-height"] = String(dims.height);
           } catch {}
         }
-        const res = await fetch("/api/vault/upload", { method: "POST", body: form });
+
+        // Step 2: upload the file as raw body (avoids FormData multipart issues on Vercel)
+        const res = await fetch("/api/vault/upload", {
+          method: "POST",
+          headers,
+          body: file,
+          // @ts-expect-error duplex required for streaming
+          duplex: "half",
+        });
         if (!res.ok) {
-          const text = await res.text();
-          console.error("Vault upload failed:", res.status, text);
+          console.error("Vault upload failed:", res.status, await res.text());
+          continue;
         }
+        const { id } = await res.json() as { id: string };
+
+        // Step 3: upload thumbnail separately (videos only)
+        if (thumbBlob) {
+          await fetch(`/api/sources/${id}/thumbnail`, {
+            method: "POST",
+            headers: { "Content-Type": "image/jpeg" },
+            body: thumbBlob,
+            // @ts-expect-error duplex required for streaming
+            duplex: "half",
+          }).catch((err) => console.warn("Thumbnail upload failed:", err));
+        }
+
+        // Step 4: kick off autotag (fire and forget — vault will poll for status)
+        void fetch(`/api/sources/${id}/autotag`, { method: "POST" });
+
       } catch (err) {
         console.error("Vault upload failed for", file.name, err);
       }

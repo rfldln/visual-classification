@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
+import { Readable } from "stream";
+import { pipeline } from "stream/promises";
+import { createWriteStream, promises as fs } from "fs";
+import path from "path";
+import os from "os";
+import crypto from "crypto";
 import { prisma } from "@/lib/db";
 import { getStorage } from "@/lib/storage";
 import { getUser, unauthorizedResponse } from "@/lib/auth";
-import { autoTagMediaItem } from "@/lib/autotag";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -15,72 +20,68 @@ export async function POST(req: Request) {
   const user = await getUser();
   if (!user) return unauthorizedResponse();
 
-  try {
-    const form = await req.formData();
-    const file = form.get("file");
-    if (!(file instanceof File)) {
-      return NextResponse.json({ error: "Missing 'file'" }, { status: 400 });
-    }
-    const originalName = (form.get("originalName") as string) || file.name || "upload.bin";
-    const mimeType = file.type || (form.get("mimeType") as string) || "application/octet-stream";
-    const isImage = IMAGE_MIME.includes(mimeType);
-    const isVideo = VIDEO_MIME.includes(mimeType);
-    if (!isImage && !isVideo) {
-      return NextResponse.json({ error: `Unsupported file type: ${mimeType}` }, { status: 400 });
-    }
+  const rawName = req.headers.get("x-filename") ?? "upload.bin";
+  let originalName: string;
+  try { originalName = decodeURIComponent(rawName); } catch { originalName = rawName; }
 
-    const duration = numOrNull(form.get("duration"));
-    const width = intOrNull(form.get("width"));
-    const height = intOrNull(form.get("height"));
+  const mimeType = req.headers.get("x-mime-type") ?? req.headers.get("content-type") ?? "application/octet-stream";
+  const isImage = IMAGE_MIME.includes(mimeType);
+  const isVideo = VIDEO_MIME.includes(mimeType);
+  if (!isImage && !isVideo) {
+    return NextResponse.json({ error: `Unsupported file type: ${mimeType}` }, { status: 400 });
+  }
+
+  const duration = numOrNull(req.headers.get("x-duration"));
+  const width    = intOrNull(req.headers.get("x-width"));
+  const height   = intOrNull(req.headers.get("x-height"));
+
+  // Stream body to a temp file so we can get the size, then upload to storage
+  const ext     = path.extname(originalName).toLowerCase();
+  const tmpName = crypto.randomBytes(8).toString("hex") + (ext || ".bin");
+  const tmpPath = path.join(os.tmpdir(), tmpName);
+
+  try {
+    if (!req.body) return NextResponse.json({ error: "Empty body" }, { status: 400 });
+    const nodeStream = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
+    await pipeline(nodeStream, createWriteStream(tmpPath));
+
+    const stat = await fs.stat(tmpPath);
+    const buf  = await fs.readFile(tmpPath);
 
     const storage = getStorage();
-    const buf = Buffer.from(await file.arrayBuffer());
-    const saved = await storage.save(buf, originalName, mimeType, { prefix: user.id });
-
-    let thumbKey: string | null = null;
-    const thumb = form.get("thumbnail");
-    if (thumb instanceof File && thumb.size > 0) {
-      const thumbBuf = Buffer.from(await thumb.arrayBuffer());
-      const savedThumb = await storage.save(thumbBuf, "thumb.jpg", "image/jpeg", { prefix: `${user.id}/thumbs` });
-      thumbKey = savedThumb.key;
-    }
+    const saved   = await storage.save(buf, originalName, mimeType, { prefix: user.id });
 
     const item = await prisma.mediaItem.create({
       data: {
-        userId: user.id,
-        filename: saved.filename,
+        userId:       user.id,
+        filename:     saved.filename,
         originalName,
         mimeType,
-        fileSize: BigInt(buf.length),
-        filePath: saved.key,
-        thumbPath: thumbKey,
-        kind: isVideo ? "VIDEO" : "IMAGE",
-        purpose: "VAULT",
+        fileSize:     BigInt(stat.size),
+        filePath:     saved.key,
+        kind:         isVideo ? "VIDEO" : "IMAGE",
+        purpose:      "VAULT",
         duration,
         width,
         height,
       },
     });
 
-    // Await so the tag is ready before the client refreshes the list.
-    // On Vercel Hobby this typically fits within the 10s budget.
-    await autoTagMediaItem(item.id).catch((err) => {
-      console.error("[vault/upload] autotag error:", err);
-    });
-
-    return NextResponse.json({ id: item.id, originalName, autoTagStatus: "DONE" });
+    return NextResponse.json({ id: item.id, originalName });
   } catch (err) {
     console.error("[vault/upload]", err);
     return NextResponse.json({ error: (err as Error).message ?? "Upload failed" }, { status: 500 });
+  } finally {
+    await fs.unlink(tmpPath).catch(() => {});
   }
 }
 
-function numOrNull(v: FormDataEntryValue | null): number | null {
-  if (typeof v !== "string" || !v) return null;
+function numOrNull(v: string | null): number | null {
+  if (!v) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
-function intOrNull(v: FormDataEntryValue | null): number | null {
+function intOrNull(v: string | null): number | null {
   const n = numOrNull(v);
   return n === null ? null : Math.round(n);
 }
