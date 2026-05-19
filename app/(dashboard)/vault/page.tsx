@@ -9,6 +9,45 @@ import { VaultItemModal, type VaultItem } from "@/components/vault/VaultItemModa
 
 type AutoTagStatus = "PENDING" | "PROCESSING" | "DONE" | "FAILED" | "SKIPPED";
 
+/** Split frames into chunks of 20, call /api/grok-tag for each, merge results. */
+async function tagInChunks(
+  frameFiles: File[],
+  kind: "image" | "video",
+  filename: string,
+  chunkSize = 20,
+): Promise<string[]> {
+  const chunks: File[][] = [];
+  for (let i = 0; i < frameFiles.length; i += chunkSize) {
+    chunks.push(frameFiles.slice(i, i + chunkSize));
+  }
+
+  const tagConfidence = new Map<string, number>();
+
+  for (const chunk of chunks) {
+    const form = new FormData();
+    form.set("kind", kind);
+    form.set("filename", filename);
+    if (kind === "image") {
+      form.set("image", chunk[0], chunk[0].name);
+    } else {
+      chunk.forEach((f) => form.append("frames", f));
+    }
+    try {
+      const res = await fetch("/api/grok-tag", { method: "POST", body: form });
+      if (!res.ok) { console.warn("Grok chunk failed:", res.status); continue; }
+      const data = await res.json() as { tags?: { id: string; confidence: number }[] };
+      for (const tag of data.tags ?? []) {
+        // Keep the highest confidence seen across all chunks for each tag
+        tagConfidence.set(tag.id, Math.max(tagConfidence.get(tag.id) ?? 0, tag.confidence ?? 1));
+      }
+    } catch (err) {
+      console.warn("Grok chunk error:", err);
+    }
+  }
+
+  return Array.from(tagConfidence.keys());
+}
+
 interface VaultResponse {
   items: VaultItem[];
   total: number;
@@ -168,20 +207,18 @@ export default function VaultPage() {
     setUploading(true);
     for (const file of list) {
       try {
-        const headers: Record<string, string> = {
-          "x-filename":  encodeURIComponent(file.name),
-          "x-mime-type": file.type,
-          "Content-Type": file.type,
-        };
+        // Step 1: probe metadata + extract thumbnail client-side
         let thumbBlob: Blob | null = null;
         let videoDuration = 0;
+        let width: number | null = null;
+        let height: number | null = null;
+
         if (file.type.startsWith("video/")) {
           try {
             const meta = await probeVideoMeta(file);
             videoDuration = meta.duration;
-            headers["x-duration"] = String(meta.duration);
-            headers["x-width"]    = String(meta.width);
-            headers["x-height"]   = String(meta.height);
+            width = meta.width;
+            height = meta.height;
             thumbBlob = await extractThumbnail(file, { timeSec: 0.5, maxWidth: 512 });
           } catch (err) {
             console.warn("Video probe/thumbnail failed:", err);
@@ -189,57 +226,75 @@ export default function VaultPage() {
         } else {
           try {
             const dims = await probeImageMeta(file);
-            headers["x-width"]  = String(dims.width);
-            headers["x-height"] = String(dims.height);
+            width = dims.width;
+            height = dims.height;
           } catch {}
         }
 
-        const res = await fetch("/api/vault/upload", {
+        // Step 2: get a Supabase signed upload URL (tiny request — no file bytes)
+        const urlRes = await fetch("/api/vault/upload-url", {
           method: "POST",
-          headers,
-          body: file,
-          // @ts-expect-error duplex required for streaming
-          duplex: "half",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: file.name, mimeType: file.type }),
         });
-        if (!res.ok) {
-          console.error("Vault upload failed:", res.status, await res.text());
+        if (!urlRes.ok) {
+          console.error("Failed to get upload URL:", await urlRes.text());
           continue;
         }
-        const { id } = await res.json() as { id: string };
+        const { signedUrl, path: storagePath } = await urlRes.json() as { signedUrl: string; path: string };
 
-        if (thumbBlob) {
-          try {
-            const thumbRes = await fetch(`/api/sources/${id}/thumbnail`, {
-              method: "POST",
-              headers: { "Content-Type": "image/jpeg" },
-              body: thumbBlob,
-            });
-            if (!thumbRes.ok) console.warn("Thumbnail upload failed:", await thumbRes.text());
-          } catch (err) {
-            console.warn("Thumbnail upload error:", err);
-          }
+        // Step 3: PUT the file DIRECTLY to Supabase — never touches Vercel
+        const uploadRes = await fetch(signedUrl, {
+          method: "PUT",
+          headers: { "Content-Type": file.type },
+          body: file,
+        });
+        if (!uploadRes.ok) {
+          console.error("Direct upload to Supabase failed:", uploadRes.status, await uploadRes.text());
+          continue;
         }
 
-        // Tag with Grok using extracted frames
+        // Step 4: register the media item in the database
+        const regRes = await fetch("/api/vault/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            path: storagePath,
+            originalName: file.name,
+            mimeType: file.type,
+            fileSize: file.size,
+            duration: videoDuration || null,
+            width,
+            height,
+          }),
+        });
+        if (!regRes.ok) {
+          console.error("Register failed:", await regRes.text());
+          continue;
+        }
+        const { id } = await regRes.json() as { id: string };
+
+        // Step 5: upload thumbnail (small JPEG, fine through Vercel)
+        if (thumbBlob) {
+          await fetch(`/api/sources/${id}/thumbnail`, {
+            method: "POST",
+            headers: { "Content-Type": "image/jpeg" },
+            body: thumbBlob,
+          }).catch((err) => console.warn("Thumbnail upload error:", err));
+        }
+
+        // Step 6: chunked Grok tagging — 20 frames per request max
         void (async () => {
           try {
-            const grokForm = new FormData();
-            grokForm.set("filename", file.name);
+            let tags: string[] = [];
             if (file.type.startsWith("video/")) {
-              grokForm.set("kind", "video");
               const frameCount = Math.max(1, Math.ceil(Math.max(1, videoDuration) / 5));
-              const frames = await extractFramesEvenly(file, { count: frameCount, maxWidth: 320, quality: 0.6 });
-              frames.forEach((b, i) =>
-                grokForm.append("frames", new File([b], `frame_${i}.jpg`, { type: "image/jpeg" })),
-              );
+              const blobs = await extractFramesEvenly(file, { count: frameCount, maxWidth: 320, quality: 0.6 });
+              const frameFiles = blobs.map((b, i) => new File([b], `frame_${i}.jpg`, { type: "image/jpeg" }));
+              tags = await tagInChunks(frameFiles, "video", file.name);
             } else {
-              grokForm.set("kind", "image");
-              grokForm.set("image", file, file.name);
+              tags = await tagInChunks([new File([file], file.name, { type: file.type })], "image", file.name);
             }
-            const grokRes = await fetch("/api/grok-tag", { method: "POST", body: grokForm });
-            if (!grokRes.ok) { console.warn("Grok tag failed:", await grokRes.text()); return; }
-            const grokData = await grokRes.json() as { tags?: { id: string }[] };
-            const tags = grokData.tags?.map((t) => t.id) ?? [];
             await fetch(`/api/sources/${id}`, {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
