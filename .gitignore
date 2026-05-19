@@ -19,3 +19,10 @@ notebooks/
 dataset/
 checkpoint/
 tsconfig.tsbuildinfo
+
+# Docker files (contain internal infra details)
+Dockerfile*
+dockerignore*
+
+# Env template
+.env.example
