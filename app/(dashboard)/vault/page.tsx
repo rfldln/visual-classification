@@ -228,7 +228,7 @@ export default function VaultPage() {
             if (file.type.startsWith("video/")) {
               grokForm.set("kind", "video");
               const frameCount = Math.max(1, Math.ceil(Math.max(1, videoDuration) / 5));
-              const frames = await extractFramesEvenly(file, { count: frameCount, maxWidth: 512, quality: 0.8 });
+              const frames = await extractFramesEvenly(file, { count: frameCount, maxWidth: 320, quality: 0.6 });
               frames.forEach((b, i) =>
                 grokForm.append("frames", new File([b], `frame_${i}.jpg`, { type: "image/jpeg" })),
               );
