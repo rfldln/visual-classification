@@ -1,27 +1,13 @@
 "use client";
 
 import { useState, useCallback, useRef } from "react";
-import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CATEGORIES } from "@/lib/taxonomy";
 import { Badge } from "@/components/ui/Badge";
-import { Modal } from "@/components/ui/Modal";
-import { probeVideoMeta, extractThumbnail } from "@/lib/video-client";
+import { probeVideoMeta, extractThumbnail, extractFramesEvenly } from "@/lib/video-client";
+import { VaultItemModal, type VaultItem } from "@/components/vault/VaultItemModal";
 
 type AutoTagStatus = "PENDING" | "PROCESSING" | "DONE" | "FAILED" | "SKIPPED";
-
-interface VaultItem {
-  id: string;
-  originalName: string;
-  kind: "IMAGE" | "VIDEO";
-  duration: number | null;
-  fileSize: string;
-  autoTags: string[];
-  autoTagStatus: AutoTagStatus;
-  autoTaggedAt: string | null;
-  thumbnailUrl: string | null;
-  mediaUrl: string;
-  uploadedAt: string;
-}
 
 interface VaultResponse {
   items: VaultItem[];
@@ -53,20 +39,101 @@ function StatusBadge({ status }: { status: AutoTagStatus }) {
     FAILED:     { label: "Failed",      tone: "danger"   },
     SKIPPED:    { label: "Skipped",     tone: "neutral"  },
   };
-  const { label, tone } = cfg[status] ?? { label: status, tone: "neutral" as const };
+  const { label, tone } = cfg[status as AutoTagStatus] ?? { label: status, tone: "neutral" as const };
   return <Badge tone={tone}>{label}</Badge>;
 }
 
-function getCategoryDisplay(id: string) {
+function getCategoryLabel(id: string) {
   return CATEGORIES.find((c) => c.id === id)?.label ?? id;
 }
 
+/* ─── Vault Card ──────────────────────────────────────────────────────────── */
+function VaultCard({ item, onClick }: { item: VaultItem; onClick: () => void }) {
+  const visibleTags = item.autoTags.slice(0, 3);
+  const extraCount = item.autoTags.length - visibleTags.length;
+
+  return (
+    <button
+      onClick={onClick}
+      className="group flex flex-col overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 text-left transition hover:border-zinc-600 hover:shadow-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+    >
+      {/* Thumbnail */}
+      <div className="relative aspect-video w-full shrink-0 overflow-hidden bg-zinc-900">
+        {item.thumbnailUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={item.thumbnailUrl}
+            alt=""
+            className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.03] group-hover:brightness-75"
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs text-zinc-600">No preview</div>
+        )}
+
+        {/* Hover "View" overlay */}
+        <div className="absolute inset-0 flex items-center justify-center opacity-0 transition-opacity group-hover:opacity-100">
+          <span className="flex items-center gap-1.5 rounded-full bg-black/60 px-3 py-1.5 text-xs font-medium text-white backdrop-blur-sm">
+            <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 3C4.667 3 1.8 5.073 1 8c.8 2.927 3.667 5 7 5s6.2-2.073 7-5c-.8-2.927-3.667-5-7-5Zm0 8a3 3 0 1 1 0-6 3 3 0 0 1 0 6Zm0-4.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3Z"/>
+            </svg>
+            View
+          </span>
+        </div>
+
+        {/* Status badge — top-right */}
+        <div className="absolute right-2 top-2">
+          <StatusBadge status={item.autoTagStatus as AutoTagStatus} />
+        </div>
+
+        {/* Duration — bottom-right (videos) */}
+        {item.duration != null && (
+          <span className="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300">
+            {formatDuration(item.duration)}
+          </span>
+        )}
+      </div>
+
+      {/* Info */}
+      <div className="flex flex-1 flex-col gap-2 p-3">
+        {/* Filename + kind */}
+        <div className="flex items-start justify-between gap-2">
+          <p className="min-w-0 truncate text-xs font-medium text-zinc-200" title={item.originalName}>
+            {item.originalName}
+          </p>
+          <Badge tone={item.kind === "VIDEO" ? "accent" : "neutral"} className="shrink-0">
+            {item.kind}
+          </Badge>
+        </div>
+
+        {/* File size */}
+        <p className="text-[11px] text-zinc-500">{formatBytes(item.fileSize)}</p>
+
+        {/* Tags */}
+        <div className="flex min-h-[22px] flex-wrap gap-1">
+          {visibleTags.length > 0 ? (
+            <>
+              {visibleTags.map((tag) => (
+                <Badge key={tag}>{getCategoryLabel(tag)}</Badge>
+              ))}
+              {extraCount > 0 && (
+                <Badge tone="neutral">+{extraCount}</Badge>
+              )}
+            </>
+          ) : item.autoTagStatus === "DONE" ? (
+            <span className="text-[10px] text-zinc-600">No tags</span>
+          ) : null}
+        </div>
+      </div>
+    </button>
+  );
+}
+
+/* ─── Main page ──────────────────────────────────────────────────────────── */
 export default function VaultPage() {
   const [page, setPage]                 = useState(1);
   const [kindFilter, setKindFilter]     = useState("");
   const [statusFilter, setStatusFilter] = useState("");
-  const [editItem, setEditItem]         = useState<VaultItem | null>(null);
-  const [editTags, setEditTags]         = useState<Set<string>>(new Set());
+  const [selectedItem, setSelectedItem] = useState<VaultItem | null>(null);
   const [uploading, setUploading]       = useState(false);
   const [dragOver, setDragOver]         = useState(false);
   const fileInputRef                    = useRef<HTMLInputElement>(null);
@@ -93,37 +160,6 @@ export default function VaultPage() {
     retry: 1,
   });
 
-  const retryMutation = useMutation({
-    mutationFn: (id: string) => fetch(`/api/sources/${id}/autotag`, { method: "POST" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["vault"] }),
-  });
-
-  const saveTagsMutation = useMutation({
-    mutationFn: ({ id, tags }: { id: string; tags: string[] }) =>
-      fetch(`/api/sources/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ autoTags: tags }),
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["vault"] });
-      setEditItem(null);
-    },
-  });
-
-  const openEdit = useCallback((item: VaultItem) => {
-    setEditItem(item);
-    setEditTags(new Set(item.autoTags));
-  }, []);
-
-  const toggleTag = useCallback((id: string) => {
-    setEditTags((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
-  }, []);
-
   const uploadFiles = useCallback(async (files: FileList | File[]) => {
     const list = Array.from(files).filter(
       (f) => f.type.startsWith("video/") || f.type.startsWith("image/"),
@@ -132,16 +168,17 @@ export default function VaultPage() {
     setUploading(true);
     for (const file of list) {
       try {
-        // Step 1: probe metadata client-side
         const headers: Record<string, string> = {
           "x-filename":  encodeURIComponent(file.name),
           "x-mime-type": file.type,
           "Content-Type": file.type,
         };
         let thumbBlob: Blob | null = null;
+        let videoDuration = 0;
         if (file.type.startsWith("video/")) {
           try {
             const meta = await probeVideoMeta(file);
+            videoDuration = meta.duration;
             headers["x-duration"] = String(meta.duration);
             headers["x-width"]    = String(meta.width);
             headers["x-height"]   = String(meta.height);
@@ -157,7 +194,6 @@ export default function VaultPage() {
           } catch {}
         }
 
-        // Step 2: upload the file as raw body (avoids FormData multipart issues on Vercel)
         const res = await fetch("/api/vault/upload", {
           method: "POST",
           headers,
@@ -171,20 +207,49 @@ export default function VaultPage() {
         }
         const { id } = await res.json() as { id: string };
 
-        // Step 3: upload thumbnail separately (videos only)
         if (thumbBlob) {
-          await fetch(`/api/sources/${id}/thumbnail`, {
-            method: "POST",
-            headers: { "Content-Type": "image/jpeg" },
-            body: thumbBlob,
-            // @ts-expect-error duplex required for streaming
-            duplex: "half",
-          }).catch((err) => console.warn("Thumbnail upload failed:", err));
+          try {
+            const thumbRes = await fetch(`/api/sources/${id}/thumbnail`, {
+              method: "POST",
+              headers: { "Content-Type": "image/jpeg" },
+              body: thumbBlob,
+            });
+            if (!thumbRes.ok) console.warn("Thumbnail upload failed:", await thumbRes.text());
+          } catch (err) {
+            console.warn("Thumbnail upload error:", err);
+          }
         }
 
-        // Step 4: kick off autotag (fire and forget — vault will poll for status)
-        void fetch(`/api/sources/${id}/autotag`, { method: "POST" });
-
+        // Tag with Grok using extracted frames
+        void (async () => {
+          try {
+            const grokForm = new FormData();
+            grokForm.set("filename", file.name);
+            if (file.type.startsWith("video/")) {
+              grokForm.set("kind", "video");
+              const frameCount = Math.max(1, Math.ceil(Math.max(1, videoDuration) / 5));
+              const frames = await extractFramesEvenly(file, { count: frameCount, maxWidth: 512, quality: 0.8 });
+              frames.forEach((b, i) =>
+                grokForm.append("frames", new File([b], `frame_${i}.jpg`, { type: "image/jpeg" })),
+              );
+            } else {
+              grokForm.set("kind", "image");
+              grokForm.set("image", file, file.name);
+            }
+            const grokRes = await fetch("/api/grok-tag", { method: "POST", body: grokForm });
+            if (!grokRes.ok) { console.warn("Grok tag failed:", await grokRes.text()); return; }
+            const grokData = await grokRes.json() as { tags?: { id: string }[] };
+            const tags = grokData.tags?.map((t) => t.id) ?? [];
+            await fetch(`/api/sources/${id}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ autoTags: tags, autoTagStatus: "DONE" }),
+            });
+            qc.invalidateQueries({ queryKey: ["vault"] });
+          } catch (err) {
+            console.warn("Vault autotag error:", err);
+          }
+        })();
       } catch (err) {
         console.error("Vault upload failed for", file.name, err);
       }
@@ -214,11 +279,11 @@ export default function VaultPage() {
   }, [uploadFiles]);
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="space-y-6 p-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-semibold">Vault</h1>
-        <p className="text-sm text-zinc-500">Upload videos or images — the model tags them automatically.</p>
+        <h1 className="text-2xl font-semibold text-zinc-100">Vault</h1>
+        <p className="mt-1 text-sm text-zinc-500">Upload media — Grok tags it automatically. Click any item to view, edit tags, or delete.</p>
       </div>
 
       {/* Upload zone */}
@@ -227,10 +292,10 @@ export default function VaultPage() {
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
         onClick={() => !uploading && fileInputRef.current?.click()}
-        className={`cursor-pointer rounded-lg border-2 border-dashed p-8 text-center transition-colors ${
+        className={`cursor-pointer rounded-xl border-2 border-dashed px-8 py-10 text-center transition-colors ${
           dragOver
-            ? "border-accent bg-accent/10 text-accent"
-            : "border-zinc-700 text-zinc-500 hover:border-zinc-500 hover:text-zinc-400"
+            ? "border-accent bg-accent/5 text-accent"
+            : "border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:text-zinc-400"
         } ${uploading ? "pointer-events-none opacity-60" : ""}`}
       >
         <input
@@ -241,10 +306,13 @@ export default function VaultPage() {
           className="hidden"
           onChange={(e) => e.target.files && void uploadFiles(e.target.files)}
         />
+        <svg className="mx-auto mb-3 h-8 w-8 opacity-50" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+        </svg>
         <p className="text-sm font-medium">
-          {uploading ? "Uploading… please wait" : "Drop videos or images here, or click to select"}
+          {uploading ? "Uploading and tagging… please wait" : "Drop files here, or click to select"}
         </p>
-        <p className="mt-1 text-xs">MP4, MOV, WebM, JPG, PNG, WebP supported</p>
+        <p className="mt-1 text-xs opacity-70">MP4, MOV, WebM, JPG, PNG, WebP · Grok tags automatically</p>
       </div>
 
       {/* Filters */}
@@ -252,7 +320,7 @@ export default function VaultPage() {
         <label className="flex flex-col gap-1 text-xs text-zinc-500">
           Type
           <select value={kindFilter} onChange={(e) => { setKindFilter(e.target.value); setPage(1); }}
-            className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-accent">
+            className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-accent">
             <option value="">All</option>
             <option value="VIDEO">Videos</option>
             <option value="IMAGE">Images</option>
@@ -261,7 +329,7 @@ export default function VaultPage() {
         <label className="flex flex-col gap-1 text-xs text-zinc-500">
           Status
           <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
-            className="rounded border border-zinc-800 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 outline-none focus:border-accent">
+            className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-sm text-zinc-100 outline-none focus:border-accent">
             <option value="">All</option>
             <option value="DONE">Tagged</option>
             <option value="PROCESSING">Processing</option>
@@ -270,126 +338,74 @@ export default function VaultPage() {
             <option value="SKIPPED">Skipped</option>
           </select>
         </label>
+        {data && (
+          <div className="ml-auto flex items-end">
+            <span className="text-xs text-zinc-500">{data.total} item{data.total !== 1 ? "s" : ""}</span>
+          </div>
+        )}
       </div>
 
       {/* Grid */}
       {isLoading ? (
-        <p className="text-sm text-zinc-500">Loading…</p>
+        <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-4">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950">
+              <div className="aspect-video w-full animate-pulse bg-zinc-800" />
+              <div className="space-y-2 p-3">
+                <div className="h-3 w-3/4 animate-pulse rounded bg-zinc-800" />
+                <div className="h-2.5 w-1/2 animate-pulse rounded bg-zinc-800" />
+              </div>
+            </div>
+          ))}
+        </div>
       ) : isError ? (
-        <div className="rounded border border-red-900 bg-red-950/30 p-6 text-sm">
+        <div className="rounded-xl border border-red-900 bg-red-950/30 p-6 text-sm">
           <p className="text-red-400">Failed to load vault: {String(error)}</p>
           <p className="mt-1 text-xs text-zinc-500">Check that all Vercel environment variables are set correctly.</p>
         </div>
       ) : !data || data.items.length === 0 ? (
-        <div className="rounded border border-dashed border-zinc-800 p-12 text-center text-sm text-zinc-500">
-          {kindFilter || statusFilter ? "No items match the current filters." : "Nothing in the vault yet — upload something above."}
+        <div className="rounded-xl border border-dashed border-zinc-800 p-16 text-center text-sm text-zinc-500">
+          {kindFilter || statusFilter
+            ? "No items match the current filters."
+            : "Nothing in the vault yet — upload something above."}
         </div>
       ) : (
         <>
           <div className="grid grid-cols-2 gap-4 md:grid-cols-3 xl:grid-cols-4">
             {data.items.map((item) => (
-              <div key={item.id} className="flex flex-col overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 hover:border-zinc-700">
-                {/* Thumbnail */}
-                <div className="relative aspect-video flex-shrink-0 bg-zinc-900">
-                  {item.thumbnailUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={item.thumbnailUrl} alt="" className="h-full w-full object-cover" />
-                  ) : (
-                    <div className="flex h-full items-center justify-center text-xs text-zinc-600">No preview</div>
-                  )}
-                  <div className="absolute left-2 top-2">
-                    <Badge tone={item.kind === "VIDEO" ? "accent" : "neutral"}>{item.kind}</Badge>
-                  </div>
-                  <div className="absolute right-2 top-2">
-                    <StatusBadge status={item.autoTagStatus} />
-                  </div>
-                  {item.duration != null && (
-                    <span className="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-zinc-300">
-                      {formatDuration(item.duration)}
-                    </span>
-                  )}
-                </div>
-
-                {/* Info */}
-                <div className="flex flex-1 flex-col gap-2 p-3">
-                  <p className="truncate text-xs font-medium text-zinc-300" title={item.originalName}>
-                    {item.originalName}
-                  </p>
-                  <p className="text-[10px] text-zinc-500">{formatBytes(item.fileSize)}</p>
-
-                  {/* Tags */}
-                  <div className="flex min-h-[22px] flex-wrap gap-1">
-                    {item.autoTags.length > 0
-                      ? item.autoTags.map((tag) => (
-                          <Badge key={tag}>{getCategoryDisplay(tag)}</Badge>
-                        ))
-                      : item.autoTagStatus === "DONE" && (
-                          <span className="text-[10px] text-zinc-600">No tags predicted</span>
-                        )}
-                  </div>
-
-                  {/* Actions */}
-                  <div className="mt-auto flex gap-2 pt-1">
-                    <button
-                      onClick={() => openEdit(item)}
-                      className="flex-1 rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:border-zinc-500 hover:text-white"
-                    >
-                      Edit tags
-                    </button>
-                    {item.autoTagStatus === "FAILED" && (
-                      <button
-                        onClick={() => retryMutation.mutate(item.id)}
-                        disabled={retryMutation.isPending}
-                        className="rounded border border-red-900 px-2 py-1 text-xs text-red-400 hover:border-red-700 hover:text-red-300 disabled:opacity-50"
-                      >
-                        Retry
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
+              <VaultCard key={item.id} item={item} onClick={() => setSelectedItem(item)} />
             ))}
           </div>
 
           {data.totalPages > 1 && (
-            <div className="mt-6 flex items-center justify-between text-sm">
-              <span className="text-zinc-500">{data.total} total</span>
+            <div className="flex items-center justify-between pt-2 text-sm">
+              <span className="text-zinc-500">Page {page} of {data.totalPages}</span>
               <div className="flex gap-2">
-                <button disabled={page <= 1} onClick={() => setPage(page - 1)}
-                  className="rounded border border-zinc-800 px-3 py-1 hover:border-zinc-600 disabled:opacity-40">Prev</button>
-                <span className="px-2 py-1 text-zinc-400">{page} / {data.totalPages}</span>
-                <button disabled={page >= data.totalPages} onClick={() => setPage(page + 1)}
-                  className="rounded border border-zinc-800 px-3 py-1 hover:border-zinc-600 disabled:opacity-40">Next</button>
+                <button
+                  disabled={page <= 1}
+                  onClick={() => setPage(page - 1)}
+                  className="rounded-lg border border-zinc-800 px-3 py-1.5 text-xs hover:border-zinc-600 disabled:opacity-40"
+                >
+                  ← Prev
+                </button>
+                <button
+                  disabled={page >= data.totalPages}
+                  onClick={() => setPage(page + 1)}
+                  className="rounded-lg border border-zinc-800 px-3 py-1.5 text-xs hover:border-zinc-600 disabled:opacity-40"
+                >
+                  Next →
+                </button>
               </div>
             </div>
           )}
         </>
       )}
 
-      {/* Tag edit modal */}
-      <Modal open={editItem != null} onClose={() => setEditItem(null)} title={`Edit tags — ${editItem?.originalName ?? ""}`}>
-        <div className="mb-4 grid max-h-72 grid-cols-2 gap-1 overflow-y-auto">
-          {CATEGORIES.map((cat) => (
-            <label key={cat.id} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm text-zinc-300 hover:bg-zinc-900">
-              <input type="checkbox" checked={editTags.has(cat.id)} onChange={() => toggleTag(cat.id)} className="accent-accent" />
-              {cat.label}
-            </label>
-          ))}
-        </div>
-        <div className="flex justify-end gap-2">
-          <button onClick={() => setEditItem(null)}
-            className="rounded border border-zinc-700 px-4 py-1.5 text-sm text-zinc-300 hover:border-zinc-500">
-            Cancel
-          </button>
-          <button
-            onClick={() => editItem && saveTagsMutation.mutate({ id: editItem.id, tags: Array.from(editTags) })}
-            disabled={saveTagsMutation.isPending}
-            className="rounded bg-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-accent/80 disabled:opacity-50"
-          >
-            {saveTagsMutation.isPending ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </Modal>
+      {/* Item modal */}
+      <VaultItemModal
+        item={selectedItem}
+        onClose={() => setSelectedItem(null)}
+      />
     </div>
   );
 }

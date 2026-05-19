@@ -41,8 +41,8 @@ export async function POST(req: Request) {
     if (frames.length === 0) {
       return NextResponse.json({ error: "No image or frames provided" }, { status: 400 });
     }
-    if (frames.length > 16) {
-      return NextResponse.json({ error: "Too many frames (max 16)" }, { status: 400 });
+    if (frames.length > 200) {
+      return NextResponse.json({ error: "Too many frames (max 200)" }, { status: 400 });
     }
 
     const imageDataUrls = await Promise.all(

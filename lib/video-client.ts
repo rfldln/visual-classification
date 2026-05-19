@@ -120,7 +120,7 @@ export async function extractFramesEvenly(
   file: File,
   opts: { count?: number; maxWidth?: number; quality?: number } = {},
 ): Promise<Blob[]> {
-  const count = Math.max(1, Math.min(16, opts.count ?? 6));
+  const count = Math.max(1, opts.count ?? 6);
   const maxWidth = opts.maxWidth ?? 512;
   const quality = opts.quality ?? 0.8;
 
@@ -172,5 +172,69 @@ export async function extractFramesEvenly(
   } finally {
     URL.revokeObjectURL(url);
   }
+  return blobs;
+}
+
+/**
+ * Same as extractFramesEvenly but accepts a URL (e.g. a Supabase signed URL)
+ * instead of a File. Used by the vault modal to re-extract frames for display.
+ * @param intervalSec - seconds between frames (default 5, no cap)
+ */
+export async function extractFramesFromUrl(
+  url: string,
+  opts: { intervalSec?: number; maxWidth?: number; quality?: number } = {},
+): Promise<{ blob: Blob; timeSec: number }[]> {
+  const intervalSec = Math.max(0.5, opts.intervalSec ?? 5);
+  const maxWidth = opts.maxWidth ?? 512;
+  const quality = opts.quality ?? 0.8;
+
+  const blobs: { blob: Blob; timeSec: number }[] = [];
+
+  const v = document.createElement("video");
+  v.preload = "auto";
+  v.muted = true;
+  v.playsInline = true;
+  v.crossOrigin = "anonymous";
+  v.src = url;
+
+  await new Promise<void>((resolve, reject) => {
+    v.onloadedmetadata = () => resolve();
+    v.onerror = () => reject(new Error("Could not load video from URL"));
+  });
+
+  const dur = Math.max(0.1, v.duration || 0.1);
+  const count = Math.max(1, Math.ceil(dur / intervalSec));
+  const stops = Array.from({ length: count }, (_, i) =>
+    Math.min(dur - 0.05, ((i + 0.5) / count) * dur),
+  );
+
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("No 2d canvas context");
+
+  for (const timeSec of stops) {
+    await new Promise<void>((resolve, reject) => {
+      v.onseeked = () => resolve();
+      v.onerror = () => reject(new Error("Seek failed"));
+      v.currentTime = timeSec;
+    });
+    const w = v.videoWidth;
+    const h = v.videoHeight;
+    const scale = w > maxWidth ? maxWidth / w : 1;
+    canvas.width = Math.round(w * scale);
+    canvas.height = Math.round(h * scale);
+    ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+    const blob: Blob = await new Promise((resolve, reject) =>
+      canvas.toBlob(
+        (b) => (b ? resolve(b) : reject(new Error("toBlob null"))),
+        "image/jpeg",
+        quality,
+      ),
+    );
+    blobs.push({ blob, timeSec });
+  }
+
+  v.removeAttribute("src");
+  v.load();
   return blobs;
 }

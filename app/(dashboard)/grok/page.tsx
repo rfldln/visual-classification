@@ -69,7 +69,7 @@ export default function GrokPage() {
         form.set("kind", "video");
         const meta = await probeVideoMeta(f);
         const dur = Math.max(1, meta.duration);
-        const count = Math.max(1, Math.min(12, Math.ceil(dur / intervalSec)));
+        const count = Math.max(1, Math.ceil(dur / intervalSec));
         const blobs = await extractFramesEvenly(f, { count, maxWidth: 512, quality: 0.8 });
         blobs.forEach((b, i) => {
           form.append("frames", new File([b], `frame_${i}.jpg`, { type: "image/jpeg" }));

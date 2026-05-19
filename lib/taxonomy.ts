@@ -1,5 +1,5 @@
 export const CATEGORIES = [
-  { id: "anal",     label: "Anal",      description: "Any content involving anal penetration, solo or partnered", group: "acts" },
+  { id: "anal",     label: "Anal",      description: "Anal penetration is actively and visibly occurring — insertion of penis, toy, or fingers into the anus must be clearly confirmed. Visible anal area alone is NOT sufficient.", group: "acts" },
   { id: "bbg",      label: "B/B/G",     description: "Two male performers with one female performer",             group: "partnered" },
   { id: "bg",       label: "B/G",       description: "One male and one female performer, standard partnered content", group: "partnered" },
   { id: "bgg",      label: "B/G/G",     description: "One male performer with two female performers",              group: "partnered" },

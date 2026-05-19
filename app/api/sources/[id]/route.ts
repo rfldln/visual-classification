@@ -47,14 +47,21 @@ export async function PATCH(
   const owned = await ownedItem(id, user.id);
   if (!owned) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  const body = (await req.json()) as { autoTags?: unknown };
+  const body = (await req.json()) as { autoTags?: unknown; autoTagStatus?: unknown };
   if (!Array.isArray(body.autoTags) || !body.autoTags.every((t) => typeof t === "string")) {
     return NextResponse.json({ error: "autoTags must be a string array" }, { status: 400 });
   }
+  const validStatuses = ["PENDING", "PROCESSING", "DONE", "FAILED", "SKIPPED"];
+  const status = typeof body.autoTagStatus === "string" && validStatuses.includes(body.autoTagStatus)
+    ? body.autoTagStatus as "PENDING" | "PROCESSING" | "DONE" | "FAILED" | "SKIPPED"
+    : undefined;
   const updated = await prisma.mediaItem.update({
     where: { id },
-    data: { autoTags: body.autoTags as string[] },
-    select: { id: true, autoTags: true },
+    data: {
+      autoTags: body.autoTags as string[],
+      ...(status ? { autoTagStatus: status, autoTaggedAt: status === "DONE" ? new Date() : undefined } : {}),
+    },
+    select: { id: true, autoTags: true, autoTagStatus: true },
   });
   return NextResponse.json(updated);
 }

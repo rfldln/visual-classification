@@ -34,10 +34,19 @@ export async function autoTagMediaItem(mediaItemId: string): Promise<void> {
   });
 
   try {
-    // For images we tag the original file. For videos we tag the client-provided
-    // thumbnail (if any) — server-side ffmpeg isn't available on Vercel Hobby.
     const isVideo = item.kind === "VIDEO";
-    const key = isVideo ? (item.thumbPath ?? item.filePath) : item.filePath;
+
+    // Videos must have a client-uploaded thumbnail (thumbPath) to be tagged.
+    // We cannot read the raw video file and send it to Grok as an image.
+    if (isVideo && !item.thumbPath) {
+      await prisma.mediaItem.update({
+        where: { id: mediaItemId },
+        data: { autoTagStatus: "SKIPPED" },
+      });
+      return;
+    }
+
+    const key = isVideo ? item.thumbPath! : item.filePath;
     if (!key) {
       await prisma.mediaItem.update({
         where: { id: mediaItemId },
