@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { CATEGORIES } from "@/lib/taxonomy";
-import { probeVideoMeta, extractFramesEvenly } from "@/lib/video-client";
+import { probeVideoMeta, extractFramesEvenly, extractFramesFromRange, createContactSheet } from "@/lib/video-client";
 
 interface GrokTag {
   id: string;
@@ -30,6 +30,62 @@ interface GrokResponse {
   error?: string;
 }
 
+type SaveStatus =
+  | { state: "idle" }
+  | { state: "saving"; count: number }
+  | { state: "saved"; count: number }
+  | { state: "failed"; message: string };
+
+/**
+ * Picks up to 5 representative frames for dataset storage.
+ *   - Video: 3 from main (early/mid-early/mid) + 2 from end zone (climax/late-climax)
+ *   - If end zone is empty (short video), all 5 come from main, evenly spaced
+ *   - If main has fewer than 5 total frames, returns whatever is available
+ */
+function selectDatasetFrames(
+  mainBlobs: Blob[],
+  endBlobs: Blob[],
+  dur: number,
+): { blob: Blob; timeSec: number }[] {
+  const mainCount = mainBlobs.length;
+  const endCount = endBlobs.length;
+  const endFraction = 0.15;
+  const endStart = (1 - endFraction) * dur;
+
+  const mainTimeAt = (i: number) =>
+    mainCount > 0 ? Math.min(dur - 0.05, ((i + 0.5) / mainCount) * dur) : 0;
+  const endTimeAt = (i: number) =>
+    endCount > 0
+      ? Math.min(dur - 0.05, endStart + ((i + 0.5) / endCount) * (endFraction * dur))
+      : 0;
+
+  const picks: { blob: Blob; timeSec: number }[] = [];
+
+  if (endCount === 0) {
+    const n = Math.min(3, mainCount);
+    if (n === 0) return [];
+    for (let k = 0; k < n; k++) {
+      const idx = Math.floor(((k + 0.5) / n) * mainCount);
+      const clamped = Math.min(mainCount - 1, Math.max(0, idx));
+      picks.push({ blob: mainBlobs[clamped], timeSec: mainTimeAt(clamped) });
+    }
+    return picks;
+  }
+
+  // Mixed selection (2 main + 1 end). Indices chosen as fractions of each section.
+  const mainPicks = [0.2, 0.6];
+  for (const f of mainPicks) {
+    const idx = Math.min(mainCount - 1, Math.max(0, Math.floor(f * mainCount)));
+    if (mainBlobs[idx]) picks.push({ blob: mainBlobs[idx], timeSec: mainTimeAt(idx) });
+  }
+  const endPicks = [0.6];
+  for (const f of endPicks) {
+    const idx = Math.min(endCount - 1, Math.max(0, Math.floor(f * endCount)));
+    if (endBlobs[idx]) picks.push({ blob: endBlobs[idx], timeSec: endTimeAt(idx) });
+  }
+  return picks;
+}
+
 const VISION_MODELS = [
   { id: "x-ai/grok-4.3",           label: "Grok 4.3 (recommended)" },
   { id: "x-ai/grok-2-vision-1212", label: "Grok 2 Vision 1212" },
@@ -46,6 +102,7 @@ export default function GrokPage() {
   const [showRaw, setShowRaw] = useState(false);
   const [intervalSec, setIntervalSec] = useState(5);
   const [model, setModel] = useState(VISION_MODELS[0].id);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>({ state: "idle" });
   const inputRef = useRef<HTMLInputElement>(null);
 
   const labelById = useMemo(() => {
@@ -58,6 +115,7 @@ export default function GrokPage() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setSaveStatus({ state: "idle" });
     try {
       const isVideo = f.type.startsWith("video") || /\.(mp4|mov|webm|mkv)$/i.test(f.name);
       const form = new FormData();
@@ -65,19 +123,48 @@ export default function GrokPage() {
       form.set("model", model);
 
       let frameDataUrls: string[] | undefined;
+      let datasetPicks: { blob: Blob; timeSec: number | null }[] = [];
       if (isVideo) {
         form.set("kind", "video");
         const meta = await probeVideoMeta(f);
         const dur = Math.max(1, meta.duration);
-        const count = Math.max(1, Math.ceil(dur / intervalSec));
-        const blobs = await extractFramesEvenly(f, { count, maxWidth: 320, quality: 0.6 });
-        blobs.forEach((b, i) => {
-          form.append("frames", new File([b], `frame_${i}.jpg`, { type: "image/jpeg" }));
+
+        // Section 1: 25 frames evenly across the full video (general overview)
+        const mainCount = Math.min(25, Math.max(1, Math.ceil(dur / intervalSec)));
+        const mainBlobs = await extractFramesEvenly(f, { count: mainCount, maxWidth: 320, quality: 0.6 });
+
+        // Section 2: dense frames from the last 15% of the video (~2s apart, max 15)
+        // Creampie/squirt are brief events (1–2s) that even sampling almost always misses.
+        const END_FRACTION = 0.15;
+        const endZoneDur = dur * END_FRACTION;
+        const endCount = dur > 60 ? Math.min(15, Math.max(1, Math.ceil(endZoneDur / 2))) : 0;
+        const endBlobs = endCount > 0
+          ? await extractFramesFromRange(f, {
+              startFraction: 1 - END_FRACTION,
+              endFraction: 1,
+              count: endCount,
+              maxWidth: 320,
+              quality: 0.6,
+            })
+          : [];
+
+        const allBlobs = [...mainBlobs, ...endBlobs];
+        frameDataUrls = allBlobs.map((b) => URL.createObjectURL(b));
+        const sheet = await createContactSheet(allBlobs, {
+          cols: 5,
+          cellWidth: 240,
+          sectionBreak: endBlobs.length > 0 ? mainBlobs.length : undefined,
         });
-        frameDataUrls = blobs.map((b) => URL.createObjectURL(b));
+        form.set("frame_count", String(allBlobs.length));
+        form.set("main_count", String(mainBlobs.length));
+        form.set("end_count", String(endBlobs.length));
+        form.append("frames", new File([sheet], "contact_sheet.jpg", { type: "image/jpeg" }));
+
+        datasetPicks = selectDatasetFrames(mainBlobs, endBlobs, dur);
       } else {
         form.set("kind", "image");
         form.set("image", f, f.name);
+        datasetPicks = [{ blob: f, timeSec: null }];
       }
 
       const res = await fetch("/api/grok-tag", { method: "POST", body: form });
@@ -87,11 +174,44 @@ export default function GrokPage() {
       } else {
         if (frameDataUrls) json.frameImages = frameDataUrls;
         setResult(json);
+        // Fire-and-forget: caption + save selected frames to dataset.
+        // Failures here don't break the Grok display.
+        if (datasetPicks.length > 0) {
+          void saveToDataset(f.name, datasetPicks);
+        }
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function saveToDataset(
+    sourceName: string,
+    picks: { blob: Blob; timeSec: number | null }[],
+  ) {
+    setSaveStatus({ state: "saving", count: picks.length });
+    try {
+      const form = new FormData();
+      form.set("sourceName", sourceName);
+      form.set(
+        "frameTimes",
+        picks.map((p) => (p.timeSec == null ? "" : p.timeSec.toFixed(3))).join(","),
+      );
+      picks.forEach((p, i) => {
+        const ext = p.blob.type.includes("png") ? "png" : "jpg";
+        form.append("frames", new File([p.blob], `frame_${i}.${ext}`, { type: p.blob.type || "image/jpeg" }));
+      });
+      const res = await fetch("/api/dataset/save", { method: "POST", body: form });
+      const json = (await res.json()) as { savedCount?: number; error?: string };
+      if (!res.ok) {
+        setSaveStatus({ state: "failed", message: json.error ?? `${res.status}` });
+        return;
+      }
+      setSaveStatus({ state: "saved", count: json.savedCount ?? 0 });
+    } catch (e) {
+      setSaveStatus({ state: "failed", message: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -119,8 +239,8 @@ export default function GrokPage() {
         <span className="text-xs text-zinc-500">via OpenRouter</span>
       </div>
       <p className="mb-6 text-sm text-zinc-400">
-        Upload an image or video and ask Grok to tag it against the project taxonomy. Results are
-        sanity-check only — they don&apos;t write to the database.
+        Upload an image or video and ask Grok to tag it against the project taxonomy. 3 representative
+        frames (1 for images) are auto-captioned and saved to the Dataset for future training.
       </p>
 
       <div className="mb-4 space-y-2 text-sm">
@@ -150,7 +270,7 @@ export default function GrokPage() {
             <span className="text-zinc-500">sec</span>
           </div>
           <span className="text-xs text-zinc-500">
-            e.g. 60s video ÷ {intervalSec}s = {Math.ceil(60 / intervalSec)} frames
+            max 40 frames — long videos auto-resample to cover full duration
           </span>
         </div>
       </div>
@@ -211,6 +331,29 @@ export default function GrokPage() {
         </div>
       )}
 
+      {saveStatus.state !== "idle" && (
+        <div
+          className={`mb-4 flex items-center gap-2 rounded border px-3 py-2 text-xs ${
+            saveStatus.state === "saving"
+              ? "border-zinc-700 bg-zinc-900 text-zinc-300"
+              : saveStatus.state === "saved"
+              ? "border-emerald-800 bg-emerald-950/40 text-emerald-300"
+              : "border-amber-800 bg-amber-950/40 text-amber-300"
+          }`}
+        >
+          {saveStatus.state === "saving" && (
+            <>
+              <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-zinc-700 border-t-accent" />
+              Captioning &amp; saving {saveStatus.count} frame{saveStatus.count === 1 ? "" : "s"} to dataset…
+            </>
+          )}
+          {saveStatus.state === "saved" && (
+            <>✓ Saved {saveStatus.count} frame{saveStatus.count === 1 ? "" : "s"} to dataset</>
+          )}
+          {saveStatus.state === "failed" && <>⚠ Dataset save failed: {saveStatus.message}</>}
+        </div>
+      )}
+
       {result && (
         <div className="space-y-4">
           <div className="rounded border border-zinc-800 bg-zinc-900 p-4">
@@ -247,7 +390,7 @@ export default function GrokPage() {
                 <p className="mb-1.5 text-xs text-zinc-500">
                   Frames sent to Grok ({result.frameImages.length})
                 </p>
-                <div className="flex flex-wrap gap-1.5">
+                <div className="flex gap-1.5 overflow-x-auto pb-1">
                   {result.frameImages.map((src, i) => (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
@@ -255,7 +398,7 @@ export default function GrokPage() {
                       src={src}
                       alt={`frame ${i + 1}`}
                       title={`Frame ${i + 1}`}
-                      className="h-20 w-auto rounded border border-zinc-700 object-cover"
+                      className="h-20 w-auto flex-none rounded border border-zinc-700 object-cover"
                     />
                   ))}
                 </div>

@@ -16,8 +16,13 @@ prisma/migrations/dev.db*
 
 # Local training/research assets — not part of the deployed app
 notebooks/
-dataset/
 checkpoint/
+# Exclude local dataset folders but keep app source directories named "dataset"
+dataset/
+!app/**/dataset/
+!app/**/dataset/**
+!components/dataset/
+!components/dataset/**
 tsconfig.tsbuildinfo
 
 # Docker files (contain internal infra details)

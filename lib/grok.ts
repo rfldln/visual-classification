@@ -17,7 +17,9 @@ Tags (use exact ids): ${defs}
 Rules:
 - List ALL applicable ids. Multi-label is expected (e.g. bg+blowjob+tits).
 - Performer-count tags are mutually exclusive: solo/bg/gg/bbg/bgg/ggg/orgy. "sextape" may stack with "bg" for cinematic quality.
+- For videos with mixed scenes (e.g. solo talking segments followed by partnered sex), use the most partnered tag seen ANYWHERE in the video — bg beats solo even if solo frames outnumber bg frames. The act tags (blowjob/handjob/anal/etc.) follow the same rule: if it happens in any frame, tag it.
 - Body tags (tits/butt/pussy/feet): only when the content's PRIMARY purpose is to showcase that body part. If an act tag (blowjob/handjob/anal/squirt) applies to the same scene, suppress the body tag unless there is a clearly distinct segment dedicated solely to that body part — visible during an act is NOT enough to tag it.
+- handjob: ONLY tag when a female performer's hand is stimulating a male performer. Male self-stimulation (solo or with a partner present) does NOT qualify — tag it as solo or bg instead.
 - anal: ONLY tag if penetration INTO the anus is actively occurring and insertion is clearly confirmed. Do NOT tag because the anal area or butt is visible, even prominently or up-close. Creampie/squirt from vaginal penetration does NOT qualify even if the anus is in frame.
 - creampie/squirt: only when explicitly visible.
 - For video frames: aggregate across all frames before answering.

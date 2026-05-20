@@ -92,3 +92,20 @@ enum ReviewStatus {
   FLAGGED
   SKIPPED
 }
+
+model DatasetSample {
+  id            String   @id @default(cuid())
+  userId        String
+  filePath      String
+  fileSize      BigInt
+  width         Int?
+  height        Int?
+  caption       String   @db.Text
+  tags          String[] @default([])
+  sourceName    String?
+  sourceTimeSec Float?
+  createdAt     DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([userId, sourceName])
+}

@@ -49,9 +49,19 @@ export async function POST(req: Request) {
       frames.map(async (f) => bufferToDataUrl(Buffer.from(await f.arrayBuffer()), f.type || "image/jpeg")),
     );
 
+    const frameCount = parseInt(form.get("frame_count") as string) || frames.length;
+    const mainCount = parseInt(form.get("main_count") as string) || frameCount;
+    const endCount = parseInt(form.get("end_count") as string) || 0;
     const userText =
       kind === "video"
-        ? `Tag this video. ${frames.length} frames in order. Aggregate then return JSON only.`
+        ? [
+            `Tag this video. The image is a two-section contact sheet (grid, left-to-right top-to-bottom, cell numbers shown):`,
+            `SECTION 1 (cells 1–${mainCount}): ${mainCount} frames sampled evenly across the FULL video. Early cells may be non-sexual intro/dialogue — acts appear in later cells.`,
+            endCount > 0
+              ? `SECTION 2 (cells ${mainCount + 1}–${frameCount}, marked with yellow "END ZONE" divider): ${endCount} frames densely sampled from the LAST 15% of the video at ~2s intervals. This is where creampie and squirt most often occur — examine these cells carefully for those tags.`
+              : null,
+            `Examine EVERY cell. Use the most explicit/partnered tags found anywhere. JSON only.`,
+          ].filter(Boolean).join(" ")
         : "Tag this image. JSON only.";
 
     const grok = await callOpenRouterGrok({
@@ -70,7 +80,7 @@ export async function POST(req: Request) {
       kind,
       filename,
       model,
-      frames: kind === "video" ? frames.length : undefined,
+      frames: kind === "video" ? frameCount : undefined,
       usage: grok.usage ?? null,
       ...parsed,
       raw: parsed.raw ?? grok.content,

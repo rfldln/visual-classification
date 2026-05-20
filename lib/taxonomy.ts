@@ -9,7 +9,7 @@ export const CATEGORIES = [
   { id: "feet",     label: "Feet",      description: "Content focused on feet, showing or close-ups",              group: "body" },
   { id: "gg",       label: "G/G",       description: "Two female performers together",                             group: "partnered" },
   { id: "ggg",      label: "G/G/G",     description: "Three female performers together",                           group: "partnered" },
-  { id: "handjob",  label: "Hand Job",  description: "Hand-only stimulation of a male performer — no mouth or sucking",  group: "acts" },
+  { id: "handjob",  label: "Hand Job",  description: "A female performer uses her hand(s) to stimulate a male performer — male self-stimulation does NOT qualify",  group: "acts" },
   { id: "orgy",     label: "Orgy",      description: "Four or more performers in group content",                   group: "partnered" },
   { id: "pussy",    label: "Pussy",     description: "Content showcasing the vagina, no toy or penetration",       group: "body" },
   { id: "sextape",  label: "Sex Tape",  description: "Higher production B/G content, cinematic quality",           group: "partnered" },
