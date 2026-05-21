@@ -14,6 +14,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
           <NavLink href="/" label="Dashboard" />
           <NavLink href="/vault" label="Vault" />
           <NavLink href="/grok" label="Grok Test" />
+          <NavLink href="/ollama" label="Ollama Test" />
           <NavLink href="/dataset" label="Dataset" />
         </nav>
         <div className="mt-auto pt-6">

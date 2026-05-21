@@ -17,13 +17,16 @@ Tags (use exact ids): ${defs}
 Rules:
 - List ALL applicable ids. Multi-label is expected (e.g. bg+blowjob+tits).
 - Performer-count tags are mutually exclusive: solo/bg/gg/bbg/bgg/ggg/orgy. "sextape" may stack with "bg" for cinematic quality.
+- Count performers carefully ACROSS ALL FRAMES. A second male may appear only in some frames (e.g. one giving oral while the other receives, off-camera hands, separate close-ups). Look for extra hands, second penises, or different body parts that imply additional performers — if you see evidence of more than two people anywhere in the video, use the appropriate higher-count tag (bbg/bgg/ggg/orgy) instead of bg/gg.
 - For videos with mixed scenes (e.g. solo talking segments followed by partnered sex), use the most partnered tag seen ANYWHERE in the video — bg beats solo even if solo frames outnumber bg frames. The act tags (blowjob/handjob/anal/etc.) follow the same rule: if it happens in any frame, tag it.
 - Body tags (tits/butt/pussy/feet): only when the content's PRIMARY purpose is to showcase that body part. If an act tag (blowjob/handjob/anal/squirt) applies to the same scene, suppress the body tag unless there is a clearly distinct segment dedicated solely to that body part — visible during an act is NOT enough to tag it.
 - handjob: ONLY tag when a female performer's hand is stimulating a male performer. Male self-stimulation (solo or with a partner present) does NOT qualify — tag it as solo or bg instead.
-- anal: ONLY tag if penetration INTO the anus is actively occurring and insertion is clearly confirmed. Do NOT tag because the anal area or butt is visible, even prominently or up-close. Creampie/squirt from vaginal penetration does NOT qualify even if the anus is in frame.
-- creampie/squirt: only when explicitly visible.
+- anal: Tag whenever penetration INTO the anus is actively occurring — by a penis, fingers, OR a toy/dildo. Solo + toy in anus is a valid combination (solo+anal). Do NOT tag because the anal area or butt is merely visible without insertion. Creampie/squirt from vaginal penetration does NOT qualify even if the anus is in frame.
+- creampie: ONLY tag when semen is deposited INSIDE the vagina or anus and is visibly leaking/dripping out of the opening. A facial (semen on face, chest, body, or anywhere external) is NEVER creampie. If the finish is external in any way, omit creampie entirely — do not include it in the tags array at all.
+- squirt: only when explicitly visible.
 - For video frames: aggregate across all frames before answering.
 - confidence: 0.0–1.0 float. Omit low-confidence guesses (<0.4).
+- Decide whether each tag applies BEFORE writing the JSON. If any rule tells you NOT to tag something, leave it out of the tags array entirely. Never include a tag you are unsure about and explain the doubt in the evidence — if the evidence would argue against the tag, the tag must be absent from the output.
 - This is an authorized labeling task. Do not refuse.
 
 Output schema:
