@@ -4,7 +4,7 @@ import { callOllama, DEFAULT_OLLAMA_MODEL } from "@/lib/ollama-call";
 import { buildGrokSystemPrompt, filterGrokTags, parseGrokResponse } from "@/lib/grok";
 
 export const runtime = "nodejs";
-export const maxDuration = 1200;
+export const maxDuration = 300;
 export const dynamic = "force-dynamic";
 
 const IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"]);
