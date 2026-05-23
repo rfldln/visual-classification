@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CATEGORIES } from "@/lib/taxonomy";
 import { probeVideoMeta, extractFramesEvenly, extractFramesFromRange, createContactSheet } from "@/lib/video-client";
 import { DEFAULT_OLLAMA_MODEL } from "@/lib/ollama-call";
@@ -11,7 +11,7 @@ interface OllamaTag {
   evidence?: string;
 }
 
-interface OllamaResponse {
+interface OllamaResult {
   kind: "image" | "video";
   filename: string;
   model: string;
@@ -23,7 +23,14 @@ interface OllamaResponse {
   summary?: string;
   notes?: string;
   raw?: string;
-  error?: string;
+}
+
+interface PollMeta {
+  kind: "image" | "video";
+  filename: string;
+  model: string;
+  frameCount?: number;
+  frameImages?: string[];
 }
 
 const PRESET_MODELS = [
@@ -35,13 +42,22 @@ export default function OllamaPage() {
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewKind, setPreviewKind] = useState<"image" | "video" | null>(null);
-  const [result, setResult] = useState<OllamaResponse | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<OllamaResult | null>(null);
+  const [status, setStatus] = useState<string | null>(null); // null = idle
   const [error, setError] = useState<string | null>(null);
   const [showRaw, setShowRaw] = useState(false);
   const [intervalSec, setIntervalSec] = useState(5);
   const [model, setModel] = useState(DEFAULT_OLLAMA_MODEL);
+
   const inputRef = useRef<HTMLInputElement>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollMetaRef = useRef<PollMeta | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+    };
+  }, []);
 
   const labelById = useMemo(() => {
     const m = new Map<string, { label: string; description: string }>();
@@ -49,10 +65,56 @@ export default function OllamaPage() {
     return m;
   }, []);
 
+  function stopPolling() {
+    if (pollTimerRef.current) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }
+
+  async function poll(jobId: string) {
+    try {
+      const res = await fetch(`/api/ollama-status/${jobId}`);
+      const json = await res.json() as { status: string; error?: string; tags?: OllamaTag[]; summary?: string; notes?: string; raw?: string; promptTokens?: number | null; completionTokens?: number | null };
+
+      if (json.status === "pending") {
+        setStatus("Waiting for RunPod (inference running)…");
+        pollTimerRef.current = setTimeout(() => poll(jobId), 3000);
+        return;
+      }
+      if (json.status === "failed") {
+        setError(json.error ?? "RunPod job failed");
+        setStatus(null);
+        return;
+      }
+      // completed
+      const meta = pollMetaRef.current!;
+      setResult({
+        kind: meta.kind,
+        filename: meta.filename,
+        model: meta.model,
+        frames: meta.frameCount,
+        frameImages: meta.frameImages,
+        tags: json.tags ?? [],
+        summary: json.summary,
+        notes: json.notes,
+        raw: json.raw,
+        promptTokens: json.promptTokens,
+        completionTokens: json.completionTokens,
+      });
+      setStatus(null);
+    } catch {
+      // transient network error — retry
+      pollTimerRef.current = setTimeout(() => poll(jobId), 3000);
+    }
+  }
+
   async function runTag(f: File) {
-    setLoading(true);
+    stopPolling();
+    setStatus("Submitting…");
     setError(null);
     setResult(null);
+
     try {
       const isVideo = f.type.startsWith("video") || /\.(mp4|mov|webm|mkv)$/i.test(f.name);
       const form = new FormData();
@@ -97,24 +159,44 @@ export default function OllamaPage() {
         form.set("image", f, f.name);
       }
 
-      const res = await fetch("/api/ollama-tag", { method: "POST", body: form });
-      const json = (await res.json()) as OllamaResponse;
-      if (!res.ok) {
+      const res = await fetch("/api/ollama-submit", { method: "POST", body: form });
+      const json = await res.json() as { mode?: string; jobId?: string; kind?: string; filename?: string; model?: string; frameCount?: number; error?: string } & Partial<OllamaResult>;
+
+      if (!res.ok || json.error) {
         setError(json.error ?? `Request failed (${res.status})`);
-      } else {
-        if (frameDataUrls) json.frameImages = frameDataUrls;
-        setResult(json);
+        setStatus(null);
+        return;
       }
+
+      if (json.mode === "sync") {
+        if (frameDataUrls) json.frameImages = frameDataUrls;
+        setResult(json as OllamaResult);
+        setStatus(null);
+        return;
+      }
+
+      // async — start polling
+      pollMetaRef.current = {
+        kind: (json.kind ?? "image") as "image" | "video",
+        filename: json.filename ?? f.name,
+        model: json.model ?? model,
+        frameCount: json.frameCount,
+        frameImages: frameDataUrls,
+      };
+      setStatus("Job submitted — waiting for RunPod…");
+      poll(json.jobId!);
+
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
+      setStatus(null);
     }
   }
 
   function onPick(f: File | null) {
+    stopPolling();
     setResult(null);
     setError(null);
+    setStatus(null);
     if (previewUrl) URL.revokeObjectURL(previewUrl);
     if (!f) {
       setFile(null);
@@ -139,7 +221,7 @@ export default function OllamaPage() {
         Upload an image or video and tag it against the project taxonomy using a local (or RunPod) Ollama model.
       </p>
 
-<div className="mb-4 space-y-2 text-sm">
+      <div className="mb-4 space-y-2 text-sm">
         <div className="flex items-center gap-3">
           <label className="w-36 text-zinc-400">Model:</label>
           <div className="flex flex-1 gap-2">
@@ -225,10 +307,10 @@ export default function OllamaPage() {
         </div>
       )}
 
-      {loading && (
+      {status && (
         <div className="mb-4 flex items-center gap-3 rounded border border-zinc-700 bg-zinc-900 p-3 text-sm text-zinc-300">
           <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-zinc-600 border-t-accent" />
-          Asking Ollama{previewKind === "video" ? ` (1 frame / ${intervalSec}s)…` : "…"}
+          {status}
         </div>
       )}
 

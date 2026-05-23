@@ -1,25 +1,17 @@
 import { NextResponse } from "next/server";
 import { getUser, unauthorizedResponse } from "@/lib/auth";
-import { callOllama, DEFAULT_OLLAMA_MODEL } from "@/lib/ollama-call";
+import { callOllama, submitRunPodJob, DEFAULT_OLLAMA_MODEL } from "@/lib/ollama-call";
 import { buildGrokSystemPrompt, filterGrokTags, parseGrokResponse } from "@/lib/grok";
 
 export const runtime = "nodejs";
-export const maxDuration = 1200;
+export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 const IMAGE_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"]);
 
-function bufferToBase64(buf: Buffer, mime: string): string {
-  // Ollama expects raw base64, not a data URL
-  void mime; // mime kept for symmetry with grok-tag; Ollama doesn't need it in the field
-  return buf.toString("base64");
-}
-
 export async function POST(req: Request) {
   const user = await getUser();
   if (!user) return unauthorizedResponse();
-
-  const baseUrl = (process.env.OLLAMA_BASE_URL ?? "http://localhost:11434").replace(/\/$/, "");
 
   try {
     const form = await req.formData();
@@ -28,28 +20,28 @@ export async function POST(req: Request) {
     const modelOverride = (form.get("model") as string) || "";
     const model = modelOverride.trim() || process.env.OLLAMA_MODEL || DEFAULT_OLLAMA_MODEL;
 
-    const frames: File[] = [];
+    const files: File[] = [];
     const single = form.get("image");
-    if (single instanceof File) frames.push(single);
+    if (single instanceof File) files.push(single);
     for (const v of form.getAll("frames")) {
-      if (v instanceof File) frames.push(v);
+      if (v instanceof File) files.push(v);
     }
 
-    if (frames.length === 0) {
+    if (files.length === 0) {
       return NextResponse.json({ error: "No image or frames provided" }, { status: 400 });
     }
-    if (frames.length > 200) {
+    if (files.length > 200) {
       return NextResponse.json({ error: "Too many frames (max 200)" }, { status: 400 });
     }
 
     const imageBase64s = await Promise.all(
-      frames.map(async (f) => {
-        const mime = IMAGE_MIME.has(f.type) ? f.type : "image/jpeg";
-        return bufferToBase64(Buffer.from(await f.arrayBuffer()), mime);
+      files.map(async (f) => {
+        void (IMAGE_MIME.has(f.type) ? f.type : "image/jpeg");
+        return Buffer.from(await f.arrayBuffer()).toString("base64");
       }),
     );
 
-    const frameCount = parseInt(form.get("frame_count") as string) || frames.length;
+    const frameCount = parseInt(form.get("frame_count") as string) || files.length;
     const mainCount = parseInt(form.get("main_count") as string) || frameCount;
     const endCount = parseInt(form.get("end_count") as string) || 0;
 
@@ -65,24 +57,40 @@ export async function POST(req: Request) {
           ].filter(Boolean).join(" ")
         : `Tag this image. Filename: "${filename}". JSON only.`;
 
-    const result = await callOllama({
-      baseUrl,
-      model,
-      systemPrompt: buildGrokSystemPrompt(),
-      userText,
-      imageBase64s,
-    });
+    const rpKey = process.env.RUNPOD_API_KEY?.trim();
+    const rpEndpoint = process.env.RUNPOD_ENDPOINT_ID?.trim();
 
-    if (!result.ok) {
-      return NextResponse.json({ error: `Ollama: ${result.error}` }, { status: result.status });
+    if (rpKey && rpEndpoint) {
+      const sub = await submitRunPodJob({
+        endpointId: rpEndpoint,
+        apiKey: rpKey,
+        model,
+        systemPrompt: buildGrokSystemPrompt(),
+        userText,
+        imageBase64s,
+      });
+      if (!sub.ok) return NextResponse.json({ error: sub.error }, { status: sub.status });
+      return NextResponse.json({
+        mode: "async",
+        jobId: sub.jobId,
+        kind,
+        filename,
+        model,
+        frameCount: kind === "video" ? frameCount : undefined,
+      });
     }
+
+    // Local Ollama fallback — run inline (no Vercel timeout concern at 60s)
+    const baseUrl = (process.env.OLLAMA_BASE_URL ?? "http://localhost:11434").replace(/\/$/, "");
+    const result = await callOllama({ baseUrl, model, systemPrompt: buildGrokSystemPrompt(), userText, imageBase64s });
+    if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
 
     const cleaned = result.content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
     const parsed = parseGrokResponse(cleaned);
-
     parsed.tags = filterGrokTags(parsed.tags);
 
     return NextResponse.json({
+      mode: "sync",
       kind,
       filename,
       model,

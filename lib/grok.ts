@@ -53,7 +53,7 @@ export interface GrokTagResponse {
  * Drops any tag whose id is not in the taxonomy.
  */
 export function parseGrokResponse(text: string): GrokTagResponse {
-  const cleaned = stripCodeFences(text).trim();
+  const cleaned = stripCodeFences(stripThinkingBlocks(text)).trim();
   const jsonSlice = extractFirstJsonObject(cleaned) ?? cleaned;
   let parsed: unknown;
   try {
@@ -85,6 +85,10 @@ export function parseGrokResponse(text: string): GrokTagResponse {
   };
 }
 
+function stripThinkingBlocks(s: string): string {
+  return s.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+}
+
 function stripCodeFences(s: string): string {
   return s.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "");
 }
@@ -111,6 +115,27 @@ function extractFirstJsonObject(s: string): string | null {
     }
   }
   return null;
+}
+
+export function filterGrokTags(tags: GrokTag[]): GrokTag[] {
+  return tags.filter((tag) => {
+    const ev = (tag.evidence ?? "").toLowerCase();
+    const selfNegated = [
+      `not tag ${tag.id}`, `no ${tag.id} tag`, `should not tag`,
+      `should not be tagged`, `do not tag`, `omit ${tag.id}`,
+    ].some((phrase) => ev.includes(phrase));
+    if (selfNegated) return false;
+    if (tag.id === "creampie") {
+      const wrongFinish = [
+        "facial", "on her face", "on his face", "on the face",
+        "on her chin", "on chin", "external finish",
+        "in her mouth", "in the mouth", "into her mouth", "into the mouth",
+        "mouth/throat", "throat", "oral finish", "swallow",
+      ];
+      if (wrongFinish.some((kw) => ev.includes(kw))) return false;
+    }
+    return true;
+  });
 }
 
 function clamp01(n: number): number {
